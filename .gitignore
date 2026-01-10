@@ -18,10 +18,9 @@ docs/
 .DS_Store
 Thumbs.db
 
-# docs フォルダ自体は残す
+# docsフォルダは残す（中身は基本無視）
 docs/*
 !docs/.gitkeep
-!docs/README.md
 
-# PDFは追跡しない（docs配下に置く運用でも外す）
+# PDFは絶対コミットしない
 docs/**/*.pdf
