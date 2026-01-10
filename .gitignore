@@ -1,15 +1,18 @@
-# virtual environment
-venv/
+# Secrets
+.env
 
-# python
+# Python
 __pycache__/
 *.pyc
 
-# env
-.env
+# Virtual env
+venv/
 
-# vector index
+# Vector DB (再生成可能)
 faiss_index/
+
+# Uploaded documents (個人データを含む可能性)
+docs/
 
 # OS
 .DS_Store

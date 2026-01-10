@@ -1,55 +1,95 @@
-# app.py
 import os
-import time
+import re
+import html
+import subprocess
+from collections import Counter
+from datetime import datetime
+from typing import Optional, List, Dict, Any
+
 import streamlit as st
 from dotenv import load_dotenv
 
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage
 from langchain_core.prompts import ChatPromptTemplate
-import time
 
-from ingest import run_ingest  # ingest.py に run_ingest() がある前提
-
+# =========================
+# 初期設定
+# =========================
 load_dotenv()
 
 DOCS_DIR = "docs"
 INDEX_DIR = "faiss_index"
+EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
-st.set_page_config(page_title="PDF管理付き RAG UI", layout="wide")
-st.title("📚 PDF管理付き RAG（OpenRouter対応）")
+st.set_page_config(page_title="OpenRouter対応RAGドキュメントQA", layout="wide")
+st.title("📄 OpenRouter対応RAG ドキュメントQA（Streamlit）")
 
 # =========================
-# 再実行ヘルパー（互換対応）
+# Prompt
 # =========================
-def force_rerun():
+QA_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", "あなたは与えられた文書だけを根拠に回答するアシスタントです。推測で断定しないでください。"),
+        ("human", "【文書】\n{context}\n\n【質問】\n{question}\n\n日本語で簡潔に回答してください。"),
+    ]
+)
+
+SUMMARY_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        ("system", "あなたは与えられた文書だけを根拠に要約するアシスタントです。推測で断定しないでください。"),
+        ("human", "【文書】\n{context}\n\n日本語で要点を箇条書きで要約してください。"),
+    ]
+)
+
+# =========================
+# Utility
+# =========================
+def ensure_dirs():
+    os.makedirs(DOCS_DIR, exist_ok=True)
+
+def list_pdfs() -> List[str]:
+    if not os.path.exists(DOCS_DIR):
+        return []
+    return sorted([f for f in os.listdir(DOCS_DIR) if f.lower().endswith(".pdf")])
+
+def run_ingest() -> bool:
     """
-    Streamlit の再実行を安全に行うヘルパー。
-    - 可能なら st.experimental_rerun() を使う
-    - なければ query params を更新して強制再実行を誘発する
+    可能なら ingest.py の run_ingest() を呼ぶ。
+    なければ python ingest.py をサブプロセスで実行。
     """
     try:
-        # 互換性のある場合はこれで即再実行
-        st.rerun()
+        import ingest  # type: ignore
+        if hasattr(ingest, "run_ingest"):
+            ingest.run_ingest()
+            return True
     except Exception:
-        # 一部の Streamlit では experimental_rerun が存在しないためフォールバック
-        try:
-            st.query_params(_rerun=int(time.time()))
-        except Exception:
-            # 最終手段：ユーザーにリロードを促すメッセージを出して処理停止
-            st.info("ページを再読み込みしてください（自動リロードに失敗しました）。")
-            st.stop()
+        pass
 
-# =========================
-# FAISSロード（キャッシュ付き）
-# =========================
-@st.cache_resource
-def load_vectorstore():
-    embeddings = HuggingFaceEmbeddings(
-        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    try:
+        subprocess.check_call(["python", "ingest.py"])
+        return True
+    except Exception as e:
+        st.error(f"インデックス再構築に失敗しました: {e}")
+        return False
+
+def load_llm(model_name: str, temperature: float) -> ChatOpenAI:
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENROUTER_API_KEY が設定されていません（.env を確認してください）")
+
+    return ChatOpenAI(
+        model=model_name,
+        temperature=temperature,
+        base_url="https://openrouter.ai/api/v1",
+        api_key=api_key,
     )
+
+@st.cache_resource
+def load_vectorstore_cached() -> Optional[FAISS]:
+    # ※ここに widget を置かない（CachedWidgetWarning回避）
+    embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
     try:
         vs = FAISS.load_local(
             INDEX_DIR,
@@ -57,206 +97,334 @@ def load_vectorstore():
             allow_dangerous_deserialization=True
         )
         return vs
-    except Exception as e:
-        print(f"[INFO] FAISS load failed: {e}")
+    except Exception:
         return None
 
-# =========================
-# LLM ローダ（簡易）
-# =========================
-def load_llm():
-    return ChatOpenAI(
-        model="gpt-4o-mini",
-        temperature=0.2,
-        base_url=os.getenv("OPENAI_API_BASE"),
-        api_key=os.getenv("OPENAI_API_KEY"),
-    )
+def clear_vectorstore_cache():
+    load_vectorstore_cached.clear()
 
-# =========================
-# プロンプト
-# =========================
-QA_PROMPT = ChatPromptTemplate.from_template(
-    """以下は参考情報です。
----------
-{context}
----------
+def get_sources_from_docs(docs) -> List[str]:
+    return [d.metadata.get("source", "unknown") for d in docs]
 
-質問:
-{question}
-
-日本語で簡潔かつ正確に答えてください。
-"""
-)
-
-SUMMARY_PROMPT = ChatPromptTemplate.from_template(
-    """以下の文書を日本語で要約してください。
----------
-{context}
----------
-"""
-)
-
-# Ensure docs dir exists
-if not os.path.exists(DOCS_DIR):
-    os.makedirs(DOCS_DIR)
-
-# =========================
-# サイドバー：PDF管理（アップロードはボタン実行方式）
-# =========================
-st.sidebar.header("PDF 管理")
-
-# アップロード（ファイル選択）
-uploaded_files = st.sidebar.file_uploader(
-    "PDFを選択（複数可）",
-    type="pdf",
-    accept_multiple_files=True,
-    key="uploader"
-)
-
-# 選択されたファイル名のプレビュー
-if uploaded_files:
-    st.sidebar.markdown("**選択ファイル**")
-    for f in uploaded_files:
-        st.sidebar.write(f.name)
-
-# アップロード保存の確定ボタン（重要：ここでのみ保存）
-if st.sidebar.button("アップロードを実行") and uploaded_files:
-    added = []
-    for uploaded in uploaded_files:
-        save_name = uploaded.name
-        save_path = os.path.join(DOCS_DIR, save_name)
-        # 衝突回避: 同名が既にある場合、タイムスタンプ付与（上書きしたいなら変える）
-        if os.path.exists(save_path):
-            base, ext = os.path.splitext(save_name)
-            save_name = f"{base}_{int(time.time())}{ext}"
-            save_path = os.path.join(DOCS_DIR, save_name)
-        try:
-            with open(save_path, "wb") as f:
-                f.write(uploaded.getbuffer())
-            added.append(save_name)
-        except Exception as e:
-            st.sidebar.error(f"{uploaded.name} の保存失敗: {e}")
-    if added:
-        st.sidebar.success(f"追加: {', '.join(added)}")
-        # キャッシュクリアして一覧を最新化
-        load_vectorstore.clear()
-        force_rerun()
-
-# =========================
-# 現在の docs フォルダのファイル表示（ファイルシステムベース）
-# =========================
-st.sidebar.markdown("---")
-st.sidebar.markdown("**現在の docs フォルダ（ファイルシステム）**")
-pdf_files_fs = sorted([f for f in os.listdir(DOCS_DIR) if f.lower().endswith(".pdf")])
-if pdf_files_fs:
-    for p in pdf_files_fs:
-        st.sidebar.write(f"- {p}")
-else:
-    st.sidebar.write("_docs フォルダにPDFがありません_")
-
-# 削除（ユーザーが選択して削除ボタンを押す方式）
-delete_targets = st.sidebar.multiselect("削除するファイルを選択", pdf_files_fs, key="del")
-if st.sidebar.button("選択ファイルを削除"):
-    if delete_targets:
-        deleted = []
-        for tgt in delete_targets:
-            try:
-                os.remove(os.path.join(DOCS_DIR, tgt))
-                deleted.append(tgt)
-            except Exception as e:
-                st.sidebar.error(f"{tgt} の削除に失敗: {e}")
-        if deleted:
-            st.sidebar.success(f"削除: {', '.join(deleted)}")
-            load_vectorstore.clear()
-            # 再起動してサイドバーを最新化
-            force_rerun()
+def normalize_query_tokens(query: str, max_tokens: int = 8) -> List[str]:
+    """
+    ハイライト用トークン抽出。
+    - 空白区切りがあればそれを優先
+    - なければクエリ全体を1トークンとして扱う（日本語想定）
+    """
+    q = (query or "").strip()
+    if not q:
+        return []
+    parts = [p.strip() for p in re.split(r"\s+", q) if p.strip()]
+    if len(parts) >= 2:
+        tokens = parts
     else:
-        st.sidebar.info("削除対象を選んでください")
+        tokens = [q]
 
-st.sidebar.markdown("---")
+    # 短すぎるトークンは除外（記号や1文字など）
+    tokens = [t for t in tokens if len(t) >= 2]
+    return tokens[:max_tokens]
 
-# インデックス再構築（ingest.run_ingest）
-if st.sidebar.button("インデックス再構築 (ingest.py 実行)"):
-    # 注意: st.sidebar.spinner は無い -> st.spinner を使う
-    with st.spinner("インデックス作成中...（時間がかかる場合があります）"):
-        chunks, docs_count = run_ingest()
-        st.sidebar.success(f"Indexed {chunks} chunks from {docs_count} documents.")
-        load_vectorstore.clear()
-        force_rerun()
+def highlight_to_html(text: str, query: str) -> str:
+    """
+    根拠チャンクの表示をHTMLでハイライト。
+    - 文字列はescapeし、マッチ部分のみ <mark> を付ける
+    """
+    safe = html.escape(text).replace("\n", "<br>")
+    tokens = normalize_query_tokens(query)
 
-st.sidebar.markdown("---")
-st.sidebar.caption("※ PDF追加後はインデックス再構築を行ってください")
+    if not tokens:
+        return safe
+
+    # 長いトークン優先で置換（部分一致の暴発を減らす）
+    tokens = sorted(tokens, key=len, reverse=True)
+
+    for t in tokens:
+        pattern = re.compile(re.escape(html.escape(t)), flags=re.IGNORECASE)
+        safe = pattern.sub(lambda m: f"<mark>{m.group(0)}</mark>", safe)
+
+    return safe
+
+def init_history():
+    if "history" not in st.session_state:
+        st.session_state["history"] = []
+
+def add_history_item(item: Dict[str, Any]):
+    st.session_state["history"].insert(0, item)  # 新しいものを先頭に
 
 # =========================
-# メインUI：検索 / 要約（インデックスベースの一覧も表示）
+# Sidebar（設定 + 履歴 + PDF管理）
 # =========================
-mode = st.radio("検索モード", ["全PDF横断", "単一PDF"], horizontal=True)
+ensure_dirs()
+init_history()
 
-# vectorstore 読み込み（キャッシュ）
-vectorstore = load_vectorstore()
+st.sidebar.header("⚙️ 設定")
 
-# 現在インデックスに含まれるPDF一覧（インデックスベース）
-indexed_pdfs = []
-if vectorstore is not None:
-    try:
-        indexed_pdfs = sorted({d.metadata.get("source") for d in vectorstore.docstore._dict.values()})
-    except Exception:
-        indexed_pdfs = []
+model_name = st.sidebar.selectbox(
+    "使用するLLM（OpenRouter）",
+    [
+        "deepseek/deepseek-v3.2",
+        "x-ai/grok-4.1-fast",
+        "openai/gpt-4o-mini",
+    ],
+    index=2
+)
 
-st.markdown("**現在インデックスに含まれるPDF**")
-if indexed_pdfs:
-    for p in indexed_pdfs:
-        st.write(f"- {p}")
-else:
-    st.write("_インデックスがありません_")
+temperature = st.sidebar.slider(
+    "temperature",
+    min_value=0.0,
+    max_value=1.0,
+    value=0.2,
+    step=0.1
+)
 
-# 単一PDF選択（インデックスベースの選択肢）
+highlight_enabled = st.sidebar.toggle(
+    "根拠チャンクをハイライト表示",
+    value=True
+)
+
+if st.sidebar.button("🧹 キャッシュクリア（FAISS再読込）"):
+    clear_vectorstore_cache()
+    st.sidebar.success("キャッシュをクリアしました。必要なら再度実行してください。")
+
+st.sidebar.divider()
+
+# ---- 履歴（メタ情報＋参照PDF） ----
+with st.sidebar.expander("🕘 質問履歴（メタ情報＋参照PDF）", expanded=False):
+    if st.session_state["history"]:
+        if st.button("履歴を全消去"):
+            st.session_state["history"] = []
+            st.success("履歴を消去しました。")
+
+        for i, h in enumerate(st.session_state["history"][:30], 1):
+            title = f"{i}. {h['time']} | {h['mode']} | {h['model']}"
+            st.markdown(f"**{title}**")
+            st.caption(f"Q: {h['question']}")
+            if h.get("selected_pdf"):
+                st.caption(f"PDF: {h['selected_pdf']}")
+            if h.get("sources"):
+                st.caption("参照: " + ", ".join(h["sources"]))
+            st.markdown("---")
+    else:
+        st.caption("まだ履歴がありません。")
+
+st.sidebar.divider()
+
+# ---- PDF管理（アップロード/削除/再構築） ----
+st.sidebar.header("📁 PDF管理")
+
+uploaded_files = st.sidebar.file_uploader(
+    "PDFを追加（複数可）",
+    type=["pdf"],
+    accept_multiple_files=True
+)
+
+if uploaded_files:
+    st.sidebar.caption("※「保存」ボタンを押すまで docs/ には書き込みません。")
+
+if st.sidebar.button("💾 アップロードPDFを保存"):
+    if not uploaded_files:
+        st.sidebar.warning("アップロードされたPDFがありません。")
+    else:
+        saved = 0
+        for f in uploaded_files:
+            save_path = os.path.join(DOCS_DIR, f.name)
+            with open(save_path, "wb") as out:
+                out.write(f.getbuffer())
+            saved += 1
+        st.sidebar.success(f"{saved} 件保存しました（{DOCS_DIR}/）")
+
+pdf_files = list_pdfs()
+
+to_delete = st.sidebar.multiselect(
+    "削除するPDF（複数可）",
+    options=pdf_files
+)
+
+if st.sidebar.button("🗑 選択したPDFを削除"):
+    if not to_delete:
+        st.sidebar.warning("削除対象が選択されていません。")
+    else:
+        deleted = 0
+        for name in to_delete:
+            path = os.path.join(DOCS_DIR, name)
+            if os.path.exists(path):
+                os.remove(path)
+                deleted += 1
+        st.sidebar.success(f"{deleted} 件削除しました。")
+
+st.sidebar.divider()
+
+if st.sidebar.button("🔁 インデックス再構築（ingest）"):
+    with st.spinner("インデックスを再構築しています…"):
+        ok = run_ingest()
+        clear_vectorstore_cache()
+    if ok:
+        st.sidebar.success("インデックス再構築が完了しました。")
+
+# =========================
+# インデックス状態表示
+# =========================
+vectorstore = load_vectorstore_cached()
+
+col_a, col_b = st.columns([1, 2])
+with col_a:
+    st.subheader("📌 状態")
+    st.write(f"- docs/ 内PDF: **{len(list_pdfs())}** 件")
+    st.write(f"- インデックス: **{'あり' if vectorstore else 'なし'}**")
+
+with col_b:
+    st.subheader("🗂 docs/ のPDF一覧")
+    if pdf_files:
+        st.write(", ".join(pdf_files))
+    else:
+        st.info("docs/ にPDFがありません。")
+
+st.divider()
+
+# =========================
+# 検索UI
+# =========================
+mode = st.radio(
+    "検索モード",
+    ["単一PDF", "全PDF横断"],
+    horizontal=True
+)
+
 selected_pdf = None
 if mode == "単一PDF":
-    if indexed_pdfs:
-        selected_pdf = st.selectbox("対象PDFを選択", indexed_pdfs)
+    if not pdf_files:
+        st.warning("docs/ にPDFがありません。PDFを追加してください。")
     else:
-        st.warning("インデックスが存在しないため、単一PDFモードは選べません。まずインデックスを作成してください。")
+        selected_pdf = st.selectbox("対象PDFを選択", pdf_files)
 
-question = st.text_area("質問（空欄の場合は要約）", value="", height=120)
+question = st.text_area(
+    "質問（単一PDFモードでは空欄＝要約、全PDF横断モードでは空欄不可）",
+    value="",
+    height=120
+)
 
-if st.button("実行"):
-    with st.spinner("検索中..."):
-        vectorstore = load_vectorstore()
-        if vectorstore is None:
-            st.warning("インデックスが存在しません。まずサイドバーの「インデックス再構築」を実行してください。")
-            st.stop()
+run = st.button("実行")
 
-        search_query = question.strip() if question.strip() else "この文書の全体概要 要点 まとめ"
+# =========================
+# 実行
+# =========================
+if run:
+    if not vectorstore:
+        st.error("インデックスがありません。サイドバーの「インデックス再構築（ingest）」を実行してください。")
+        st.stop()
 
+    if mode == "単一PDF" and not selected_pdf:
+        st.warning("単一PDFを選択してください。")
+        st.stop()
+
+    # 全PDF横断は空欄禁止（あなたの方針）
+    if mode == "全PDF横断" and not question.strip():
+        st.warning("全PDF横断モードでは質問を入力してください（空欄要約は不可）。")
+        st.stop()
+
+    with st.spinner("検索・生成中…"):
+        # 検索クエリ補完（単一PDFの空欄要約のみ対応）
+        search_query = question.strip()
+        is_summary = False
+        if mode == "単一PDF" and not search_query:
+            search_query = "この文書の全体概要 要点 まとめ"
+            is_summary = True
+
+        # 検索
         if mode == "単一PDF":
-            docs = vectorstore.similarity_search(search_query, k=8, filter={"source": selected_pdf})
+            docs = vectorstore.similarity_search(
+                search_query,
+                k=8,
+                filter={"source": selected_pdf}
+            )
         else:
-            docs = vectorstore.similarity_search(search_query, k=12)
+            docs = vectorstore.similarity_search(
+                search_query,
+                k=12
+            )
 
         if not docs:
-            st.warning("該当する情報が見つかりませんでした")
+            st.warning("該当する情報が見つかりませんでした（検索ヒット0件）。")
             st.stop()
 
-        if mode == "全PDF横断":
-            referenced_pdfs = sorted({d.metadata.get("source", "unknown") for d in docs})
-            st.subheader("📂 参照されたPDF")
-            for pdf in referenced_pdfs:
-                st.write(f"- {pdf}")
+        # 参照元（①：出典付き回答のために先に作る）
+        sources = sorted(set(get_sources_from_docs(docs)))
+        counts = Counter(get_sources_from_docs(docs))
 
+        # コンテキスト作成
         context = "\n\n".join(d.page_content for d in docs)
-        if question.strip():
-            prompt = QA_PROMPT.format(context=context, question=question)
+
+        # 生成
+        llm = load_llm(model_name=model_name, temperature=temperature)
+
+        if mode == "単一PDF" and is_summary:
+            messages = SUMMARY_PROMPT.format_messages(context=context)
+            display_question = "(要約)"
         else:
-            prompt = SUMMARY_PROMPT.format(context=context)
+            messages = QA_PROMPT.format_messages(context=context, question=question)
+            display_question = question.strip()
 
-        llm = load_llm()
-        response = llm.invoke([HumanMessage(content=prompt)])
+        response = llm.invoke(messages)
 
-        st.subheader("📝 回答")
-        st.write(response.content)
+    # ---- ④ 履歴保存（メタ情報＋参照PDF） ----
+    add_history_item({
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "mode": mode,
+        "question": display_question,
+        "selected_pdf": selected_pdf if mode == "単一PDF" else None,
+        "model": model_name,
+        "temperature": temperature,
+        "sources": sources,
+    })
 
-        with st.expander("🔍 参照された文書チャンク"):
+    st.caption(f"Mode: {mode} / Model: {model_name} / temperature: {temperature}")
+
+    st.subheader("📝 回答")
+    st.write(response.content)
+
+    # ---- ① 出典付き回答：参照元PDFを回答直下に表示 ----
+    st.markdown("**参照元（検索ヒット由来）:** " + (", ".join(sources) if sources else "なし"))
+
+    # ---- ③ 全PDF横断：PDF寄与度バー（チャンク数） ----
+    if mode == "全PDF横断":
+        st.subheader("📊 PDF寄与度（参照チャンク数）")
+        # Streamlitのbar_chartは dict/list/df を食べられるので、依存を増やさない書き方
+        chart_data = {k: v for k, v in counts.most_common()}
+        st.bar_chart(chart_data)
+
+    # ---- 参照元の表示（全PDF横断はPDF別にまとめる） ----
+    if mode == "全PDF横断":
+        st.subheader("📚 参照されたPDF（詳細）")
+        st.caption("※検索でヒットしたチャンクの出典です（回答が参照した可能性が高いPDF）")
+        for name, cnt in counts.most_common():
+            st.markdown(f"- **{name}**（参照チャンク: {cnt}）")
+
+        st.subheader("🔎 PDF別の参照チャンク（根拠）")
+        for name, cnt in counts.most_common():
+            with st.expander(f"{name}（{cnt} chunks）"):
+                for i, d in enumerate([x for x in docs if x.metadata.get("source") == name], 1):
+                    st.markdown(f"**Chunk {i}**")
+                    if highlight_enabled:
+                        st.markdown(
+                            highlight_to_html(d.page_content, question),
+                            unsafe_allow_html=True
+                        )
+                    else:
+                        st.write(d.page_content)
+                    st.markdown("---")
+    else:
+        with st.expander("🔍 参照された文書チャンク（根拠）"):
             for i, d in enumerate(docs, 1):
-                st.markdown(f"**[{i}] {d.metadata.get('source')}**")
-                st.write(d.page_content)
+                st.markdown(f"**Chunk {i}**")
+                if highlight_enabled and (question.strip() or search_query.strip()):
+                    # 単一PDFの要約時は search_query を使うと少し意味が出る
+                    q_for_hl = question if question.strip() else search_query
+                    st.markdown(
+                        highlight_to_html(d.page_content, q_for_hl),
+                        unsafe_allow_html=True
+                    )
+                else:
+                    st.write(d.page_content)
+                st.caption(f"source: {d.metadata.get('source')}")
+                st.markdown("---")
