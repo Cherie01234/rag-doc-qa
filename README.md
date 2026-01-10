@@ -1,10 +1,6 @@
 # 📄 OpenRouter対応 RAG ドキュメントQA（Streamlit）
 
-<<<<<<< HEAD
 ![App Screenshot](images/app_screen.png)
-=======
-![App Screenshot](images/screenshot.png)
->>>>>>> 1b583fe (Update README and keep docs folder empty)
 
 PDFドキュメントを検索・要約し、**複数のLLM（DeepSeek / Grok / GPT）を切り替えて**質問応答できる  
 **RAG（Retrieval Augmented Generation）アプリケーション**です。
