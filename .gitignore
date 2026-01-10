@@ -18,5 +18,10 @@ docs/
 .DS_Store
 Thumbs.db
 
-# PDF documents (do not publish)
-docs/*.pdf
+# docs フォルダ自体は残す
+docs/*
+!docs/.gitkeep
+!docs/README.md
+
+# PDFは追跡しない（docs配下に置く運用でも外す）
+docs/**/*.pdf
