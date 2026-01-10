@@ -17,3 +17,6 @@ docs/
 # OS
 .DS_Store
 Thumbs.db
+
+# PDF documents (do not publish)
+docs/*.pdf
