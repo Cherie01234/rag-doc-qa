@@ -121,10 +121,10 @@ rag-doc-qa/
 ├── app.py              # Streamlit UI
 ├── ingest.py           # PDF → FAISS 変換
 ├── query.py            # CLIテスト用（任意）
-├── docs/               # PDF配置（※個人情報がある場合は公開しない推奨）
+├── docs/               # PDF配置（※公開リポジトリでは空）
 ├── faiss_index/        # ベクトルDB（再生成可能）
 ├── images/
-│   └── screenshot.png  # README用スクリーンショット
+│   └── app_screen.png  # README用スクリーンショット
 ├── run_app.bat
 ├── .env                # APIキー（絶対にコミットしない）
 └── requirements.txt
@@ -140,5 +140,5 @@ rag-doc-qa/
 ---
 
 ## ⚠️ 注意
-- `.env`（APIキー）や `docs/`（個人PDF）、`faiss_index/` は公開リポジトリに含めない運用を推奨します（`.gitignore` 対応）。
+- `.env`（APIキー）や `docs/`（個人PDF）、`faiss_index/` は公開リポジトリに含めない構成にしています（`.gitignore` 対応）。
 - OpenRouterの利用には料金・レート制限がある場合があります。必要に応じてモデルや設定値を調整してください。
