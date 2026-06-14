@@ -1,3 +1,7 @@
+# requirements.txt
+# pip freeze で生成した固定バージョン一覧
+# langchain-huggingface を明示（langchain_community.embeddings は非推奨のため）
+
 aiohappyeyeballs==2.6.1
 aiohttp==3.13.3
 aiosignal==1.4.0
