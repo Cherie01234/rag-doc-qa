@@ -5,6 +5,10 @@ LangChain + FAISS + Streamlit で構成されており、OpenRouter 経由で複
 
 ---
 
+![アプリ画面](images/app_screen.png)
+
+---
+
 ## 📌 主な機能
 
 | 機能 | 説明 |
