@@ -1,5 +1,7 @@
 # 📄 RAG ドキュメント QA アプリ
 
+[![CI](https://github.com/Cherie01234/rag-doc-qa/actions/workflows/ci.yml/badge.svg)](https://github.com/Cherie01234/rag-doc-qa/actions/workflows/ci.yml)
+
 PDF・テキストファイルに対して自然言語で質問できる、RAG（Retrieval-Augmented Generation）ベースの QA アプリです。  
 LangChain + FAISS + Streamlit で構成されており、OpenRouter 経由で複数の LLM を切り替えて利用できます。
 
