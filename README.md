@@ -2,6 +2,18 @@
 
 [![CI](https://github.com/Cherie01234/rag-doc-qa/actions/workflows/ci.yml/badge.svg)](https://github.com/Cherie01234/rag-doc-qa/actions/workflows/ci.yml)
 
+## 概要
+
+| 項目 | 内容 |
+|---|---|
+| 解く課題 | 手元のPDF・テキストに自然言語で質問し、回答と、その根拠になった文書の箇所をあわせて得る。LLMの回答が文書のどこに基づくかを、利用者が自分で確かめられるようにする |
+| 手法 | LangChainで文書を分割（800文字・重なり100文字）→ Sentence-Transformers（`all-MiniLM-L6-v2`）で埋め込み → FAISSで質問に近いチャンクを検索 → LangChain経由のLLM（OpenRouterの DeepSeek / Grok / GPT-4o mini を画面で切替）で回答を生成。根拠チャンクのハイライト表示と、複数PDFを横断したときの文書ごとの参照数の表示に対応 |
+| 評価 | 回答・検索の精度の定量評価は未実施（今後の課題）。テストは文書の分割と設定値を対象に整備（pytest） |
+| 使い方 | `.env` に `OPENROUTER_API_KEY` を設定 → `streamlit run app.py` → サイドバーでPDFを追加して「インデックス再構築」→ 質問を入力 |
+| 開発 | 設計から個人で開発（開発にはAIエージェントを活用）。pytest と GitHub Actions の CI を整備 |
+
+---
+
 PDF・テキストファイルに対して自然言語で質問できる、RAG（Retrieval-Augmented Generation）ベースの QA アプリです。  
 LangChain + FAISS + Streamlit で構成されており、OpenRouter 経由で複数の LLM を切り替えて利用できます。
 
